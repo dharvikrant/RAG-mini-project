@@ -1,5 +1,13 @@
+.env
+.env.*
+!.env.example
+
+data/*
+!data/.gitkeep
+documents/
+*.pdf
+
+venv/
 .venv/
 __pycache__/
-*.pyc
-.env
 faiss_store/

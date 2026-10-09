@@ -1,9 +1,21 @@
+
 import hashlib
 import os
+from pathlib import Path
 
-from src.data_loader import list_supported_files, load_documents_from_files
+import streamlit as st
+
+from src.data_loader import list_supported_files
 from src.search import RAGSearch
 from src.vectorstore import FaissVectorStore
+from src.data_loader import load_documents_from_files
+
+
+st.set_page_config(
+    page_title="RAG Document Assistant",
+    page_icon="📚",
+    layout="wide",
+)
 
 
 def build_persist_dir(selected_files):
@@ -12,77 +24,100 @@ def build_persist_dir(selected_files):
     return os.path.join("faiss_store", digest)
 
 
-def choose_files(data_dir: str):
-    files = list_supported_files(data_dir)
-    if not files:
-        raise ValueError("No supported documents found in the 'data' folder.")
-
-    print("Available files:")
-    for index, file_path in enumerate(files, start=1):
-        print(f"{index}. {file_path.name}")
-
-    selection = input("Select file numbers separated by commas, or type 'all': ").strip().lower()
-    if selection == "all":
-        return files
-
-    selected_indexes = []
-    for part in selection.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        if not part.isdigit():
-            raise ValueError("Invalid selection. Use numbers like 1,2 or type 'all'.")
-        selected_indexes.append(int(part))
-
-    selected_files = []
-    for idx in selected_indexes:
-        if idx < 1 or idx > len(files):
-            raise ValueError("Selected file number is out of range.")
-        selected_files.append(files[idx - 1])
-
-    if not selected_files:
-        raise ValueError("No files selected.")
-    return selected_files
-
-
-def ensure_vectorstore(persist_dir: str, selected_files):
+def ensure_vectorstore(persist_dir, selected_files):
     store = FaissVectorStore(persist_dir)
+
     faiss_path = os.path.join(persist_dir, "faiss.index")
     meta_path = os.path.join(persist_dir, "metadata.pkl")
 
-    if not (os.path.exists(faiss_path) and os.path.exists(meta_path)):
-        docs = load_documents_from_files(selected_files)
-        if not docs:
-            raise ValueError("No readable content found in the selected files.")
-        store.build_from_documents(docs)
-    else:
+    if os.path.exists(faiss_path) and os.path.exists(meta_path):
         store.load()
+    else:
+        docs = load_documents_from_files(selected_files)
+
+        if not docs:
+            raise ValueError(
+                "No readable content found in the selected files."
+            )
+
+        store.build_from_documents(docs)
 
     return store
 
 
-if __name__ == "__main__":
-    selected_files = choose_files("data")
-    print("Selected files:")
-    for file_path in selected_files:
-        print(f"- {file_path.name}")
-
+@st.cache_resource(show_spinner="Loading documents and AI model...")
+def get_rag_search(selected_paths):
+    selected_files = [Path(path) for path in selected_paths]
     persist_dir = build_persist_dir(selected_files)
+
     ensure_vectorstore(persist_dir, selected_files)
 
-    rag_search = RAGSearch(persist_dir=persist_dir)
-    while True:
-        query = input("Enter your question (or type 'exit' to quit): ").strip()
-        if not query:
-            print("Please enter a question.")
-            continue
-        if query.lower() in {"exit", "quit"}:
-            break
+    return RAGSearch(persist_dir=persist_dir)
 
-        result = rag_search.answer_question(query, top_k=3)
-        print("\nAnswer:", result["answer"])
-        if result["sources"]:
-            print("\nSources:")
-            for source in result["sources"]:
-                print(f"- {source['label']}")
-        print()
+
+st.title("📚 RAG Document Assistant")
+st.write(
+    "Upload-free document question answering: "
+    "select a PDF from your data folder and ask questions about it."
+)
+
+st.info(
+    "Choose documents below, then enter a question. "
+    "Answers can include the source document and page numbers."
+)
+
+try:
+    available_files = list_supported_files("data")
+except Exception as error:
+    st.error(f"Could not read the data folder: {error}")
+    st.stop()
+
+if not available_files:
+    st.warning(
+        "No supported documents found. Add your PDF files "
+        "to the project's data folder."
+    )
+    st.stop()
+
+file_options = [str(path) for path in available_files]
+
+selected_paths = st.multiselect(
+    "Select document(s)",
+    options=file_options,
+    format_func=lambda path: Path(path).name,
+    placeholder="Choose one or more documents",
+)
+
+question = st.text_input(
+    "Your question",
+    placeholder="Example: What is the main topic of this document?",
+)
+
+if st.button("Get Answer", type="primary"):
+    if not selected_paths:
+        st.warning("Please select at least one document.")
+    elif not question.strip():
+        st.warning("Please enter a question.")
+    else:
+        try:
+            with st.spinner("Searching documents and generating your answer..."):
+                rag_search = get_rag_search(tuple(selected_paths))
+                result = rag_search.answer_question(
+                    question.strip(),
+                    top_k=3,
+                )
+
+            st.subheader("Answer")
+            st.write(result["answer"])
+
+            sources = result.get("sources", [])
+            if sources:
+                st.subheader("Sources")
+                for source in sources:
+                    st.write(f"- {source['label']}")
+
+        except Exception as error:
+            st.error(f"Something went wrong: {error}")
+            st.caption(
+                "Check the Command Prompt for the full error details."
+            )
